@@ -31,12 +31,16 @@ import           Prelude                (Semigroup (..))
 import           Text.Printf            (printf)
 import           Wallet.Emulator.Wallet
 
+{-# INLINABLE tn #-}
+tn :: TokenName
+tn = TokenName emptyByteString
+
 {-# INLINABLE mkPolicy #-}
 -- Minting policy for an NFT, where the minting transaction must consume the given UTxO as input
 -- and where the TokenName will be the empty ByteString.
 mkPolicy :: TxOutRef -> ScriptContext -> Bool
-mkPolicy oref ctx = traceIfFalse "UTxO not consumed" hasUTxO &&
-                    traceIfFalse "does not match TokenName" matchesTokenName
+mkPolicy oref ctx = traceIfFalse "UTxO not consumed"   hasUTxO           &&
+                    traceIfFalse "wrong amount minted" checkMintedAmount
   where
     info :: TxInfo
     info = scriptContextTxInfo ctx
@@ -44,13 +48,10 @@ mkPolicy oref ctx = traceIfFalse "UTxO not consumed" hasUTxO &&
     hasUTxO :: Bool
     hasUTxO = any (\i -> txInInfoOutRef i == oref) $ txInfoInputs info
 
-    matchesTokenName :: Bool
-    matchesTokenName = case flattenValue (txInfoForge info) of
-        [(_, tn, _)] -> tn ==  thisTokenName
-        _ -> False
-
-thisTokenName :: TokenName
-thisTokenName = tokenName mempty
+    checkMintedAmount :: Bool
+    checkMintedAmount = case flattenValue (txInfoForge info) of
+        [(cs, tn', amt)] -> cs  == ownCurrencySymbol ctx && tn' == tn && amt == 1
+        _                -> False
 
 policy :: TxOutRef -> Scripts.MonetaryPolicy
 policy oref = mkMonetaryPolicyScript $
@@ -67,14 +68,14 @@ type NFTSchema =
 
 mint :: Contract w NFTSchema Text ()
 mint = do
-    pk <- Contract.ownPubKey
+    pk    <- Contract.ownPubKey
     utxos <- utxoAt (pubKeyAddress pk)
     case Map.keys utxos of
         []       -> Contract.logError @String "no utxo found"
         oref : _ -> do
-            let val = Value.singleton (curSymbol oref) thisTokenName 1
+            let val     = Value.singleton (curSymbol oref) tn 1
                 lookups = Constraints.monetaryPolicy (policy oref) <> Constraints.unspentOutputs utxos
-                tx = Constraints.mustForgeValue val <> Constraints.mustSpendPubKeyOutput oref
+                tx      = Constraints.mustForgeValue val <> Constraints.mustSpendPubKeyOutput oref
             ledgerTx <- submitTxConstraintsWith @Void lookups tx
             void $ awaitTxConfirmed $ txId ledgerTx
             Contract.logInfo @String $ printf "forged %s" (show val)
